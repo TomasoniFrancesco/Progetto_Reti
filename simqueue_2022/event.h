@@ -1,77 +1,63 @@
-/* -*- C++ -*- */
 /*******************************************************
-            EVENT . H
-
-    Eventi del simulatore. Modificato per il progetto C3:
-    arrival e service ora referenziano la classe `queue`
-    (sistema multi-servente) tramite puntatore, invece
-    del singolo `buffer*`. service trasporta anche
-    l'indice del servente che completa il servizio.
+		     EVENT . H
 *******************************************************/
+
 
 #ifndef _EVENT_H
 #define _EVENT_H
 
 #include "global.h"
+#include "buffer.h"
 
-// Forward declaration: event.cpp/.c include queue.h dove necessario.
-class queue;
 
-class event {
+class event{
 public:
-    event*  next;
-    double  time;
-    event();
-    event(double Time);
-    event(event* Next, double Time);
-    virtual ~event() {}
-    virtual void body() {}
+	event*	next;	// next event
+	double 	time;	// event time
+	event();
+	event(double Time);
+	event(event* Next, double Time);
+	~event(){}
+	virtual void body(){}
 };
 
-inline event::event() {
-    next = NULL;
-    time = -1;
-}
+inline event::event(){
+	next=NULL;
+	time=-1;
+	}
 
-inline event::event(event* Next, double Time) {
-    next = Next;
-    time = Time;
-}
+inline event::event(event* Next, double Time){
+	next=Next;
+	time=Time;
+	}
 
-inline event::event(double Time) {
-    next = NULL;
-    time = Time;
-}
+inline event::event(double Time){
+	time=Time;
+	}
 
-// -------------------------------------------------------------
-// arrival: arrivo di un pacchetto al sistema. body() schedula
-// il prossimo arrivo (inter-arrivo esponenziale di media 1/lambda),
-// sceglie la coda di destinazione secondo la politica configurata
-// nel `queue` e, se il servente scelto era idle, schedula il
-// relativo evento di servizio.
-// -------------------------------------------------------------
-class arrival: public event {
-    queue* sys;
-public:
-    arrival(double Time, queue* Sys): event(Time) { sys = Sys; }
-    virtual ~arrival() {}
-    virtual void body();
-};
+class arrival: public event{
 
-// -------------------------------------------------------------
-// service: completamento del servizio del servente srv_id. body()
-// rimuove il pacchetto in testa, aggiorna le statistiche tempo-pesate
-// e di sojourn, e se la coda non e' vuota schedula il prossimo servizio.
-// -------------------------------------------------------------
-class service: public event {
-    queue* sys;
-    int    srv_id;
-public:
-    service(double Time, queue* Sys, int Id): event(Time) {
-        sys = Sys; srv_id = Id;
-    }
-    virtual ~service() {}
-    virtual void body();
-};
+	buffer** bufs;		// CAMBIATO: array di tutti gli N buffer (uno per server), serve per instradare
+
+	public:
+	int source_id;
+	virtual void body();
+	arrival(double Time, buffer** Bufs);	// CAMBIATO: riceve l'array di buffer
+	};
+
+class service: public event{
+
+	buffer* buf;
+	int	server_id;	// NUOVO: indice del server a cui appartiene questo servizio (per scegliere il giusto mu_i)
+
+	public:
+	virtual void body();
+	service(double Time, buffer* Buf, int Server_id): event(Time){buf=Buf; server_id=Server_id;}	// CAMBIATO: memorizza anche il server_id
+	};
+
+inline arrival::arrival(double Time, buffer** Bufs): event(Time){
+	bufs=Bufs;		// CAMBIATO: salva l'array di buffer
+	}
 
 #endif
+

@@ -13,6 +13,7 @@ class buffer	{
 	packet* last;
 	public:
 	int	status;
+	int	queue_size;	// NUOVO: numero di pacchetti attualmente in attesa in coda (serve per la politica "coda piu' corta")
 
 public:
 	buffer();

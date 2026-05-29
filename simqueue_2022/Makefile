@@ -1,8 +1,15 @@
 CC	      = g++
 
-CFLAGS        = -g -Wall -Wextra
+#CFLAGS	      = -O4 -DNDEBUG -funroll-loops
+CFLAGS	      = -g	
 
 LIBFLAG       = -lm
+
+EXTHDRS	      = /usr/include/assert.h \
+		/usr/include/floatingpoint.h \
+		/usr/include/math.h \
+		/usr/include/stdio.h \
+		/usr/include/sys/ieeefp.h
 
 HDRS	      = global.h \
 		queue.h \
@@ -13,11 +20,10 @@ HDRS	      = global.h \
 		event.h \
 		easyio.h \
 		stat.h \
-		buffer.h
-
+		buffer.h 
+ 
 MAKEFILE      = Makefile
 
-# Oggetti del simulatore (file legacy modificati per il progetto C3).
 OBJS	      = main.o \
 		queue.o \
 		rand.o \
@@ -27,9 +33,10 @@ OBJS	      = main.o \
 		event.o \
 		easyio.o \
 		stat.o \
-		buffer.o
+		buffer.o 
 
-PROGRAM	      = queue
+PROGRAM	      = queue 
+
 
 SRCS	      = main.c \
 		queue.c \
@@ -40,34 +47,30 @@ SRCS	      = main.c \
 		event.c \
 		easyio.c \
 		stat.c \
-		buffer.c
+		buffer.c 
 
-# Runner C++ ausiliario (orchestratore degli esperimenti della relazione,
-# non parte del simulatore in senso stretto).
-RUNNER        = runner
-RUNNER_OBJS   = runner.o
+all:		$(PROGRAM)
 
-all:		$(PROGRAM) $(RUNNER)
-
-$(PROGRAM):	$(OBJS)
+$(PROGRAM):     $(OBJS) $(LIBS)
 		@echo -n "Loading $(PROGRAM) ... "
-		@$(CC) $(CFLAGS) $(OBJS) -o $(PROGRAM) $(LIBFLAG)
+		@$(CC) $(CFLAGS) $(OBJS) $(LIBS) -o $(PROGRAM) $(LIBFLAG)
 		@echo "done"
 
-$(RUNNER):	$(RUNNER_OBJS)
-		@echo -n "Loading $(RUNNER) ... "
-		@$(CC) $(CFLAGS) $(RUNNER_OBJS) -o $(RUNNER)
-		@echo "done"
+clean:;		@rm -f $(OBJS)
 
-# Pattern per sorgenti .cpp (es. runner.cpp).
-%.o: %.cpp
-		$(CC) $(CFLAGS) -c $< -o $@
+depend:;	@mkmf -f $(MAKEFILE) PROGRAM=$(PROGRAM)
 
-# Override del pattern .c -> .o: silenzia i warning preesistenti
-# legati alla conversione implicita C -> C++ (clang) e ai string
-# literal in easyio.c, senza modificare i sorgenti legacy.
-%.o: %.c
-		$(CC) $(CFLAGS) -Wno-deprecated -Wno-writable-strings \
-			-Wno-unused-but-set-variable -c $< -o $@
+index:;		@ctags -wx $(HDRS) $(SRCS)
 
-clean:;		@rm -f $(OBJS) $(RUNNER_OBJS) $(PROGRAM) $(RUNNER)
+tags:           $(HDRS) $(SRCS); @ctags $(HDRS) $(SRCS)
+
+###
+main.o: global.h simulator.h queue.h
+queue.o: global.h simulator.h queue.h event.h
+rand.o: global.h rand.h
+simulator.o: global.h 
+calendar.o: calendar.h global.h
+packet.o: packet.h global.h
+buffer.o: buffer.h global.h
+event.o: global.h event.h
+# DO NOT DELETE

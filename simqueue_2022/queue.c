@@ -1,296 +1,227 @@
 /* -*- C++ -*- */
 /*******************************************************
-            QUEUE . C
-
-    Implementazione del simulatore multi-coda (progetto C3).
+		QUEUE.C
 *******************************************************/
-
-#include <cstdio>
-#include <climits>
 #include "global.h"
+#include <stdio.h>
 #include "queue.h"
 #include "rand.h"
+#include "buffer.h"
+#include "event.h"
+#include "calendar.h"
 #include "easyio.h"
 
-// Calendario eventi globale condiviso fra arrivi e servizi.
-// Riferito da event.c tramite "extern calendar* cal".
-calendar* cal = NULL;
+calendar* cal;		// events calendar
+double	inter;
+double*	duration_i;	// CAMBIATO: durata media di servizio per ogni server (1/mu_i)
+int	N;		// NUOVO: numero di server
+int	routing_policy;	// NUOVO: 0=casuale, 1=round-robin, 2=coda piu' corta
+int	rr_counter;	// NUOVO: contatore per il round-robin
+double 	Trslen;
+double 	Runlen;
+int 	NRUNmin;
+int 	NRUNmax;
 
-// =================================================================
-// Costruttore / distruttore
-// =================================================================
-queue::queue(int argc, char* argv[]): simulator(argc, argv) {
-    cal          = new calendar();
-    N            = 0;
-    lambda       = 0.0;
-    policy       = POL_RANDOM;
-    sojourn_sum  = 0.0;
-    pkt_done     = 0;
-    rr_next      = 0;
-    in_run_phase = false;
-    trans_len    = 0.0;
-    sim_len      = 0.0;
-    stats_start  = 0.0;
-    clock_now    = 0.0;
-    batch_mode   = false;
+
+queue::queue(int argc,char *argv[]): simulator(argc,argv)
+{
+cal=new calendar();
+delay=new Sstat();
+imbalance=new Sstat();	// NUOVO: statistica dello sbilanciamento
+// NUOVO: le strutture che dipendono da N sono allocate in input(), quando N e' noto
+bufs=NULL;
+q_len=NULL;
+duration_i=NULL;
 }
 
-queue::~queue() {
-    for (int i = 0; i < N; ++i) {
-        delete queues[(size_t)i];
-    }
-    delete cal;
-    cal = NULL;
+queue::~queue()
+{
+delete delay;
+delete imbalance;		// NUOVO
+delete cal;
+// NUOVO: libero le N code e le N statistiche di lunghezza
+for(int i=0;i<N;i++){
+	delete bufs[i];
+	delete q_len[i];
+	}
+delete[] bufs;
+delete[] q_len;
+delete[] duration_i;
 }
 
-// =================================================================
-// Impostazione parametri in modalita' batch
-// =================================================================
-void queue::set_batch(int N_, double lambda_,
-                      const std::vector<double>& mu_,
-                      int policy_, double trans_, double simlen_) {
-    N         = N_;
-    lambda    = lambda_;
-    mu        = mu_;
-    policy    = (routing_policy)policy_;
-    trans_len = trans_;
-    sim_len   = simlen_;
-    batch_mode = true;
+void queue::input(){
+printf("MODEL PARAMETERS:\n\n");
+	N=read_int("Number of servers (N)",2,1,100);	// NUOVO: numero di server/code
+	traffic_model=1;	// CAMBIATO: la consegna fissa arrivi di Poisson, niente piu' menu' a una sola voce
+	lambda=read_double("Arrival rate lambda (pkt/s)",1.0,0.001,10000);	// CAMBIATO: leggo lambda invece del carico
+	inter=1.0/lambda;	// CAMBIATO: tempo medio tra arrivi = 1/lambda
+	service_model=1;	// CAMBIATO: la consegna fissa servizio esponenziale, niente piu' menu' a una sola voce
+
+	// NUOVO: ora che conosco N, alloco le strutture per server
+	duration_i=new double[N];
+	bufs=new buffer*[N];
+	q_len=new Sstat*[N];
+	// NUOVO: leggo il tasso di servizio mu_i di ogni server e creo la sua coda e la sua statistica
+	for(int i=0;i<N;i++){
+		char prompt[80];
+		sprintf(prompt,"Service rate mu for server %d (pkt/s)",i);
+		double mu=read_double(prompt,1.0,0.001,10000);
+		duration_i[i]=1.0/mu;	// durata media di servizio = 1/mu_i
+		bufs[i]=new buffer();	// una coda FIFO per ogni server
+		q_len[i]=new Sstat();	// una statistica di lunghezza coda per ogni server
+		}
+
+	// NUOVO: scelta della politica di instradamento
+	printf("\n Routing policy:\n");
+	printf("0 - Random\n");
+	printf("1 - Round-robin\n");
+	printf("2 - Shortest queue\n");
+	routing_policy=read_int("",0,0,2);
+	rr_counter=0;		// NUOVO: inizializzo il contatore round-robin
+
+printf("SIMULATION PARAMETERS:\n\n");
+	Trslen=read_double("Simulation transient len (s)", 100, 0.01, 10000);
+	Runlen=read_double("Simulation RUN len (s)",  100, 0.01, 10000);
+	NRUNmin=read_int("Simulation number of RUNs", 5, 2, 100);
 }
 
-// =================================================================
-// Input interattivo (modalita' default).
-// =================================================================
-void queue::input() {
-    fprintf(fpout, "\nPARAMETRI DEL MODELLO\n");
-    // Assunzione: N>=1, default 2 serventi.
-    N = read_int((char*)"Numero di serventi N", 2, 1, 100);
 
-    // Tasso totale di arrivi al sistema (Poisson).
-    lambda = read_double((char*)"Tasso di arrivo lambda (pkt/s)",
-                         1.0, 0.0001, 1.0e6);
 
-    mu.resize((size_t)N);
-    for (int i = 0; i < N; ++i) {
-        char prompt[80];
-        std::snprintf(prompt, sizeof(prompt),
-                      "Tasso di servizio mu[%d] (pkt/s)", i);
-        // Assunzione: ogni mu_i puo' essere diverso. Default mu=1.
-        mu[(size_t)i] = read_double(prompt, 1.0, 0.0001, 1.0e6);
-    }
-
-    fprintf(fpout, "\nPolitica di instradamento:\n");
-    fprintf(fpout, "  0 - Random (uniforme tra le N code)\n");
-    fprintf(fpout, "  1 - Round-robin (ciclico deterministico)\n");
-    fprintf(fpout, "  2 - Shortest queue (JSQ, parita' a caso)\n");
-    int p = read_int((char*)"Scelta", 0, 0, 2);
-    policy = (routing_policy)p;
-
-    fprintf(fpout, "\nPARAMETRI DI SIMULAZIONE\n");
-    // Assunzione: il transitorio (warm-up) si scarta; le statistiche
-    // partono al termine del transitorio.
-    trans_len = read_double((char*)"Durata del transitorio (s)",
-                            100.0, 0.0, 1.0e9);
-    sim_len   = read_double((char*)"Durata fase di misurazione (s)",
-                            1000.0, 0.01, 1.0e9);
+void queue::init()
+{
+input();
+event* Ev;
+Ev=new arrival(0.0, bufs);	// CAMBIATO: il primo arrivo riceve l'array di tutte le code
+cal->put(Ev);
 }
 
-// =================================================================
-// Inizializzazione: alloca code/contatori e schedula il primo arrivo.
-// =================================================================
-void queue::init() {
-    if (!batch_mode) {
-        input();
-    }
+void queue::run(){
+	
+	extern double 	Trslen;
+	extern double 	Runlen;
+	extern int 	NRUNmin;
+	extern int 	NRUNmax;
 
-    queues.assign((size_t)N, (buffer*)NULL);
-    busy  .assign((size_t)N, 0);
-    lenq  .assign((size_t)N, 0);
-    last_t.assign((size_t)N, 0.0);
-    area  .assign((size_t)N, 0.0);
-    for (int i = 0; i < N; ++i) {
-        queues[(size_t)i] = new buffer();
-    }
+        double clock=0.0;
+        event* ev;
+        while (clock<Trslen){
+        	ev=cal->get();
+        	ev->body();
+        	clock=ev->time; 
+        	delete(ev);     
+        	}
+	clear_stats();
+	clear_counters();
+	int current_run_number=1;
+	while(current_run_number<=NRUNmin){
+		while (clock<(current_run_number*Runlen+Trslen)){
+			ev=cal->get();
+	                ev->body();
+       	         	clock=ev->time;
+                	delete(ev);
+			}
+		update_stats();
+		clear_counters();
+		print_trace(current_run_number);
+		current_run_number++;
+		}
+	}
 
-    // Primo arrivo a t=0; gli inter-arrivi successivi sono esponenziali.
-    cal->put(new arrival(0.0, this));
+
+void queue::results()
+{
+	extern double 	Trslen;
+	extern double 	Runlen;
+	extern int 	NRUNmin;
+	extern int 	NRUNmax;
+
+	fprintf(fpout, "*********************************************\n");
+	fprintf(fpout, "           SIMULATION RESULTS                \n");
+	fprintf(fpout, "*********************************************\n\n");
+	fprintf(fpout, "Input parameters:\n");
+	fprintf(fpout, "Number of servers            %5d\n", N);			// NUOVO
+	fprintf(fpout, "Arrival rate lambda          %5.3f\n", lambda);		// CAMBIATO
+	const char* polname[3]={"Random","Round-robin","Shortest queue"};	// NUOVO: nomi delle politiche
+	fprintf(fpout, "Routing policy               %s\n", polname[routing_policy]);	// NUOVO
+	for(int i=0;i<N;i++)							// NUOVO: stampo il mu di ogni server
+		fprintf(fpout, "  Server %2d service rate mu  %5.3f\n", i, 1.0/duration_i[i]);
+	fprintf(fpout, "Transient length (s)         %5.3f\n", Trslen);
+	fprintf(fpout, "Run length (s)               %5.3f\n", Runlen);
+	fprintf(fpout, "Number of runs               %5d\n", NRUNmin);
+	fprintf(fpout, "\nResults:\n");
+	// CAMBIATO: ora e' il tempo medio di permanenza nel sistema
+	fprintf(fpout, "Mean time in system          %2.6f   +/- %.2e  p:%3.2f\n",
+			delay->mean(),
+			delay->confidence(.95),
+			delay->confpercerr(.95));
+	for(int i=0;i<N;i++)							// NUOVO: lunghezza media di ogni coda
+		fprintf(fpout, "Mean queue length server %2d  %2.6f   +/- %.2e\n",
+				i, q_len[i]->mean(), q_len[i]->confidence(.95));
+	fprintf(fpout, "Load imbalance (max-min)     %2.6f   +/- %.2e\n",	// NUOVO: indice di sbilanciamento
+			imbalance->mean(), imbalance->confidence(.95));
 }
 
-// =================================================================
-// Helper: schedulazione di eventi.
-// =================================================================
-void queue::schedule_arrival(double now) {
-    double iat;
-    GEN_EXP(SEED, 1.0 / lambda, iat);
-    cal->put(new arrival(now + iat, this));
+void queue::print_trace(int n)
+{
+      fprintf(fptrc, "*********************************************\n");
+      fprintf(fptrc, "                 TRACE RUN %d                \n", n);
+      fprintf(fptrc, "*********************************************\n\n");
+
+	
+      fprintf(fptrc, "Mean time in system          %2.6f   +/- %.2e  p:%3.2f\n",	// CAMBIATO
+                        delay->mean(),
+                        delay->confidence(.95),
+                        delay->confpercerr(.95));
+      for(int i=0;i<N;i++)						// NUOVO: lunghezza media coda per server
+		fprintf(fptrc, "Mean queue length server %2d  %2.6f\n", i, q_len[i]->mean());
+      fprintf(fptrc, "Load imbalance               %2.6f\n", imbalance->mean());	// NUOVO
+      fflush(fptrc);
+
 }
 
-void queue::schedule_service(int i, double now) {
-    double svc;
-    GEN_EXP(SEED, 1.0 / mu[(size_t)i], svc);
-    cal->put(new service(now + svc, this, i));
+void queue::clear_counters()
+{
+	// CAMBIATO: azzero i contatori di ogni server
+	for(int i=0;i<N;i++){
+		bufs[i]->tot_delay=0.0;
+		bufs[i]->tot_packs=0.0;
+		}
 }
 
-// Aggiorna l'integrale tempo-pesato area += len(t) * dt.
-void queue::update_area(int i, double now) {
-    size_t k = (size_t)i;
-    area[k]  += (double)lenq[k] * (now - last_t[k]);
-    last_t[k] = now;
+void queue::clear_stats()
+{
+	delay->reset();
+	imbalance->reset();		// NUOVO
+	for(int i=0;i<N;i++)		// NUOVO: azzero le statistiche di lunghezza coda
+		q_len[i]->reset();
+}
+void queue::update_stats()
+{
+	extern double Runlen;
+
+	// CAMBIATO: tempo medio di permanenza nel sistema su tutti i pacchetti di questo run
+	double tot_d=0.0, tot_p=0.0;
+	for(int i=0;i<N;i++){
+		tot_d+=bufs[i]->tot_delay;
+		tot_p+=bufs[i]->tot_packs;
+		}
+	if(tot_p>0) *delay+=tot_d/tot_p;
+
+	// NUOVO: lunghezza media di ogni coda con la Legge di Little.
+	// Lq_i = lambda_i * Wq_i = (somma sojourn_i - n_pacchetti_i * servizio_medio_i) / durata_run
+	double maxL=-1e99, minL=1e99;
+	for(int i=0;i<N;i++){
+		double L=(bufs[i]->tot_delay - bufs[i]->tot_packs*duration_i[i])/Runlen;
+		if(L<0) L=0;		// piccoli valori negativi dovuti al rumore statistico -> 0
+		*q_len[i]+=L;
+		if(L>maxL) maxL=L;	// traccio il massimo per lo sbilanciamento
+		if(L<minL) minL=L;	// traccio il minimo per lo sbilanciamento
+		}
+	// NUOVO: indice di sbilanciamento del carico = differenza tra coda piu' lunga e piu' corta
+	*imbalance+=(maxL-minL);
 }
 
-// =================================================================
-// Politica di instradamento del pacchetto in arrivo.
-// =================================================================
-int queue::route_packet() {
-    if (policy == POL_RANDOM) {
-        int idx;
-        GEN_UNIF(SEED, 0, N - 1, idx);
-        return idx;
-    }
-    if (policy == POL_ROUND_ROBIN) {
-        int idx = rr_next;
-        rr_next = (rr_next + 1) % N;
-        return idx;
-    }
-    // POL_SHORTEST: cerca il minimo di lenq[]; in caso di parita',
-    // scegli a caso fra gli indici a pari lunghezza minima.
-    int min_len = INT_MAX;
-    for (int i = 0; i < N; ++i) {
-        if (lenq[(size_t)i] < min_len) min_len = lenq[(size_t)i];
-    }
-    std::vector<int> tied;
-    tied.reserve((size_t)N);
-    for (int i = 0; i < N; ++i) {
-        if (lenq[(size_t)i] == min_len) tied.push_back(i);
-    }
-    int t_idx;
-    GEN_UNIF(SEED, 0, (int)tied.size() - 1, t_idx);
-    return tied[(size_t)t_idx];
-}
-
-// =================================================================
-// Run: transitorio + fase di misurazione.
-// =================================================================
-void queue::run() {
-    event* ev;
-    double t = 0.0;
-
-    // --- Fase 1: transitorio (gli accumulatori si azzerano al termine) ---
-    in_run_phase = false;
-    while (t < trans_len) {
-        ev = cal->get();
-        if (ev == NULL) break;
-        ev->body();
-        t = ev->time;
-        delete ev;
-    }
-    // Reset degli accumulatori: la fase di misurazione parte da t corrente.
-    stats_start = t;
-    for (int i = 0; i < N; ++i) {
-        last_t[(size_t)i] = t;
-        area  [(size_t)i] = 0.0;
-    }
-    sojourn_sum = 0.0;
-    pkt_done    = 0;
-    in_run_phase = true;
-
-    // --- Fase 2: misurazione ---
-    double t_end = stats_start + sim_len;
-    while (t < t_end) {
-        ev = cal->get();
-        if (ev == NULL) break;
-        ev->body();
-        t = ev->time;
-        delete ev;
-    }
-
-    // Chiude l'integrale dell'area fino all'istante finale.
-    for (int i = 0; i < N; ++i) {
-        area[(size_t)i] += (double)lenq[(size_t)i]
-                           * (t - last_t[(size_t)i]);
-        last_t[(size_t)i] = t;
-    }
-    clock_now = t;
-}
-
-// =================================================================
-// Output dei risultati (umani e CSV).
-// =================================================================
-const char* queue::policy_name() const {
-    switch (policy) {
-        case POL_RANDOM:      return "Random (uniforme)";
-        case POL_ROUND_ROBIN: return "Round-robin";
-        case POL_SHORTEST:    return "Shortest queue (JSQ)";
-    }
-    return "?";
-}
-
-void queue::results() {
-    double T = clock_now - stats_start;
-    double mean_sojourn = (pkt_done > 0)
-        ? sojourn_sum / (double)pkt_done
-        : 0.0;
-
-    fprintf(fpout, "\n*****************************************************\n");
-    fprintf(fpout, "         RISULTATI DELLA SIMULAZIONE (progetto C3)\n");
-    fprintf(fpout, "*****************************************************\n\n");
-    fprintf(fpout, "Parametri di input:\n");
-    fprintf(fpout, "  Politica di instradamento  : %s\n", policy_name());
-    fprintf(fpout, "  Numero di serventi N       : %d\n", N);
-    fprintf(fpout, "  Tasso di arrivo lambda     : %.4f pkt/s\n", lambda);
-    for (int i = 0; i < N; ++i) {
-        fprintf(fpout, "    mu[%d]                    : %.4f pkt/s\n",
-                i, mu[(size_t)i]);
-    }
-    fprintf(fpout, "  Transitorio (scartato)     : %.4f s\n", trans_len);
-    fprintf(fpout, "  Fase di misurazione        : %.4f s\n", T);
-    fprintf(fpout, "  Pacchetti serviti misurati : %ld\n\n", pkt_done);
-
-    fprintf(fpout, "Metriche:\n");
-    fprintf(fpout, "  Tempo medio di permanenza nel sistema (sojourn): "
-                   "%.6f s\n\n", mean_sojourn);
-
-    fprintf(fpout, "  Lunghezza media di ogni coda\n");
-    fprintf(fpout, "  (pacchetti totali nel sistema-servente, ovvero in "
-                   "coda + in servizio):\n");
-    double Lmin =  1.0e300;
-    double Lmax = -1.0e300;
-    for (int i = 0; i < N; ++i) {
-        double Li = (T > 0.0) ? area[(size_t)i] / T : 0.0;
-        if (Li < Lmin) Lmin = Li;
-        if (Li > Lmax) Lmax = Li;
-        fprintf(fpout, "    L[%d] = %.6f pkt\n", i, Li);
-    }
-    fprintf(fpout, "\n  Indice di sbilanciamento (L_max - L_min): %.6f pkt\n",
-            Lmax - Lmin);
-    fprintf(fpout, "*****************************************************\n");
-}
-
-// Stampa una singola riga CSV con i risultati. Usata dal runner.
-// Schema:
-//   CSV,policy,N,lambda,trans,sim_T,W,imbalance,pkts,L0,L1,...
-void queue::results_csv() {
-    double T = clock_now - stats_start;
-    double mean_sojourn = (pkt_done > 0)
-        ? sojourn_sum / (double)pkt_done
-        : 0.0;
-    double Lmin =  1.0e300;
-    double Lmax = -1.0e300;
-    std::vector<double> Ls((size_t)N, 0.0);
-    for (int i = 0; i < N; ++i) {
-        Ls[(size_t)i] = (T > 0.0) ? area[(size_t)i] / T : 0.0;
-        if (Ls[(size_t)i] < Lmin) Lmin = Ls[(size_t)i];
-        if (Ls[(size_t)i] > Lmax) Lmax = Ls[(size_t)i];
-    }
-    fprintf(fpout, "CSV,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%ld",
-            (int)policy, N, lambda, trans_len, T, mean_sojourn,
-            Lmax - Lmin, pkt_done);
-    for (int i = 0; i < N; ++i) {
-        fprintf(fpout, ",%.6f", Ls[(size_t)i]);
-    }
-    fprintf(fpout, "\n");
-}
-
-// In questa versione la simulazione e' single-run: niente tracce per-run.
-void queue::print_trace(int /*Run*/) {
+int queue::isconfsatisf(double perc)
+{
+        return delay->isconfsatisfied(10, .95);
 }
